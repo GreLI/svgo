@@ -14,7 +14,8 @@ exports.params = {
     removeUseless: true,
     collapseRepeated: true,
     leadingZero: true,
-    negativeExtraSpace: true
+    negativeExtraSpace: true,
+    removeSmallCurves: false // 1 is a good value to start
 };
 
 var pathElems = require('./_collections.js').pathElems,
@@ -229,6 +230,7 @@ function convertToRelative(path) {
 
             item.instruction = instruction;
             item.data = data;
+            item.absCoords = point.slice(-2);
 
         }
 
@@ -255,12 +257,15 @@ function filters(path, params) {
 
     var instruction,
         data,
-        prev;
+        prev,
+        subpathPoint;
 
-    path = path.filter(function(item) {
+    path = path.filter(function(item, index, path) {
 
         instruction = item.instruction;
         data = item.data;
+
+        if ('mM'.indexOf(instruction) > -1) subpathPoint = item.absCoords;
 
         if (data) {
 
@@ -460,6 +465,67 @@ function filters(path, params) {
 
             }
 
+            if (
+                params.removeSmallCurves &&
+                'qc'.indexOf(instruction) > -1 &&
+                Math.pow(item.absCoords[0] - path[index - 1].absCoords[0], 2) +
+                Math.pow(item.absCoords[1] - path[index - 1].absCoords[1], 2) <
+                Math.pow(params.removeSmallCurves, 2)
+            ) {
+                var adjancentItems = getAdjancentItems(path, index),
+                    controlPoints = [
+                        data[0],
+                        data[1],
+                        instruction === 'c' ? data[2] - data[4] : data[0] - data[2],
+                        instruction === 'c' ? data[3] - data[5] : data[1] - data[3],
+                    ];
+
+                // Check if the curve is relatively blunt (angle > 45°).
+                if (adjancentItems && checkAngles(controlPoints)) {
+                    var items = adjancentItems.items,
+                        linesPoints = adjancentItems.points,
+                        nextM = adjancentItems.nextM;
+                    // Get lines intersection point. The angle check ensures they aren't parallel.
+                    var crossPoint = getCrossingPoint(linesPoints),
+                        newPoints = [
+                            crossPoint[0] - linesPoints[0],
+                            crossPoint[1] - linesPoints[1],
+                            linesPoints[6] - crossPoint[0],
+                            linesPoints[7] - crossPoint[1]
+                        ];
+
+                    if (params.floatPrecision) {
+                        newPoints = roundData(newPoints, params.floatPrecision);
+                    }
+
+                    // Modify adjancent lines
+                    for (var i = 0; i < items.length; i++) {
+                        switch (items[i].instruction) {
+                            case 'c':
+                                items[i].data[4] = newPoints[2*i];
+                                items[i].data[5] = newPoints[2*i + 1];
+                            break;
+                            case 'm':
+                            case 'l': items[i].data[1] = newPoints[2*i + 1]; // falls through for x-coord
+                            case 'h': items[i].data[0] = newPoints[2*i];
+                            break;
+                            case 'v': items[i].data[0] = newPoints[2*i + 1];
+                        }
+                    }
+                    // Update prev and current item too, since it will stay along the filter process.
+                    items[0].absCoords[0] = item.absCoords[0] = crossPoint[0];
+                    items[0].absCoords[1] = item.absCoords[1] = crossPoint[1];
+
+                    if (nextM && nextM.instruction === 'm') {
+                        nextM.data[0] = nextM.absCoords[0] - subpathPoint[0];
+                        nextM.data[1] = nextM.absCoords[1] - subpathPoint[1];
+                    }
+
+                    // Remove the curve
+                    return false;
+                }
+            }
+
             item.instruction = instruction;
             item.data = data;
 
@@ -554,5 +620,212 @@ function isCurveStraightLine(xs, ys) {
     if (+area.toFixed(2)) return false;
 
     return true;
+
+}
+
+/**
+ * Check if angles more then 45° 
+ *
+ * @param {Array} coordinates of adjancent lines points (8 = 4×2)
+ * @return {Array} coordinate of lines intersection point, false if none (parallel lines)
+ */
+
+function checkAngles(points) {
+
+    if (
+        !points.length ||
+        points.length !== 4 ||
+        !points.every(function(n){ return !isNaN(n) && isFinite(n) })
+    )
+        return false;
+
+    var num = points[0]*points[1] + points[2]*points[3],
+        denom1 = points[0]*points[0] + points[1]*points[1],
+        denom2 = points[2]*points[2] + points[3]*points[3];
+
+    // Check the angle between the curve tangents by computing cos^2.
+    // (Square to avoid taking root but sign is preserved.)
+    return (
+        denom1 > 0 &&
+        denom2 > 0 &&
+        num * Math.abs(num) / (denom1*denom2) < .5
+    ) ? true : false;
+
+}
+
+/**
+ * Computes line equation from points and gets the intersection point.
+ *
+ * @param {Array} coordinates of adjancent lines points (8 numbers for 4 points)
+ * @return {Array} coordinate of lines intersection point, false if none (parallel lines or bad arguments)
+ */
+
+function getCrossingPoint(points) {
+    if (
+        !points.length ||
+        points.length !== 8 ||
+        !points.every(function(n){ return !isNaN(n) && isFinite(n) })
+    )
+        return false;
+
+    var // Prev line equation parameters.
+        a = points[1] - points[3], // y1 - y2
+        b = points[2] - points[0], // x2 - x1
+        c = points[0]*points[3] - points[2]*points[1], // x1*y2 - x2*y1
+        // Next line equation parameters
+        a1 = points[5] - points[7], // y1 - y2
+        b1 = points[6] - points[4], // x2 - x1
+        c1 = points[4]*points[7] - points[5]*points[6], // x1*y2 - x2*y1
+        denom1 = (a*b1 - a1*b),
+        denom2 = (b*a1 - b1*a);
+
+    return denom1 !== 0 && denom2 !== 0 ? [
+        (c1*b - c*b1) / denom1,
+        (c1*a - c*a1) / denom2
+    ] : false;
+
+}
+
+function getAdjancentItems(path, index) {
+
+    // Simplest case: prev and next items are lines.
+    if (
+        'lhv'.indexOf(path[index - 1].instruction) > -1 &&
+        (
+            'lhv'.indexOf(path[index + 1].instruction) > -1 ||
+            path[index + 1].instruction === 'c' &&
+            isCurveStraightLine(
+                [ 0, path[index + 1].data[0], path[index + 1].data[2], path[index + 1].data[4] ],
+                [ 0, path[index + 1].data[1], path[index + 1].data[3], path[index + 1].data[5] ]
+            )
+        )
+    ) {
+        return {
+            items: [
+                path[index - 1],
+                path[index + 1]
+            ],
+            points: [].concat(
+                path[index - 2].absCoords,
+                path[index - 1].absCoords,
+                path[index].absCoords,
+                path[index + 1].absCoords
+            )
+        }
+    }
+
+    var eps = .01;
+
+    // The curve at the start.
+    if (
+        'Mm'.indexOf(path[index - 1].instruction) > -1 &&
+        (
+            'lhv'.indexOf(path[index + 1].instruction) > -1 ||
+            path[index + 1].instruction === 'c' &&
+            isCurveStraightLine(
+                [ 0, path[index + 1].data[0], path[index + 1].data[2], path[index + 1].data[4] ],
+                [ 0, path[index + 1].data[1], path[index + 1].data[3], path[index + 1].data[5] ]
+            )
+        )
+    ) {
+
+        var lastItem,
+            startPoint;
+
+        // Find the last item.
+        for (var i = index; path[++i] && !'mz'.indexOf(path[i].instruction); )
+            lastItem = path[i];
+
+        // Path is closed by additional line formed automatically.
+        if (
+            Math.abs(lastItem.absCoords[0] - path[index - 1][0]) > eps ||
+            Math.abs(lastItem.absCoords[1] - path[index - 1][1]) > eps
+        ) {
+            startPoint = path[i - 1].absCoords
+        }
+
+        // Last item is a line and closes the path.
+        else if (
+            'lhv'.indexOf(lastItem.instruction) > -1 &&
+            Math.abs(lastItem.absCoords[0] - path[index - 1][0]) < eps &&
+            Math.abs(lastItem.absCoords[1] - path[index - 1][1]) < eps
+        ) {
+            startPoint = path[i - 2].absCoords;
+        }
+        if (!startPoint) return false;
+
+        var adjancentItems = {
+                items: [
+                    path[index - 1],
+                    path[index + 1]
+                ],
+                points: [].concat(
+                    startPoint,
+                    path[index - 1].absCoords,
+                    path[index].absCoords,
+                    path[index + 1].absCoords
+                )
+            },
+            nextM;
+
+        // Find next move command
+        for (var j = i; (nextM = path[j]) && 'Mm'.indexOf(nextM.instruction) === -1; j++);
+        if (nextM) adjancentItems.nextM = nextM;
+
+        return adjancentItems;
+    }
+
+    // The curve at the end.
+    if (
+        'lhv'.indexOf(path[index - 1].instruction) > -1 &&
+        (
+            !path[index + 1] ||
+            'mz'.indexOf(path[index + 1].instruction) > -1
+        )
+    ) {
+
+        // Find the start.
+        for (var i = index; path[--i] && 'Mm'.indexOf(path[i].instruction) === -1; );
+
+        if (!path[i]) return false;
+
+        var items = [ path[index - 1] ], // No need in updating next sibling.
+            endPoint;
+
+        // Path is closed by additional line formed automatically.
+        if (
+            Math.abs(path[index][1] - path[i].absCoords[0]) > eps ||
+            Math.abs(path[index][0] - path[i].absCoords[1]) > eps
+        ) {
+            endPoint = path[i].absCoords;
+        }
+
+        // First item is a line.
+        else if ('lhv'.indexOf(path[i + 1].instruction) > -1) {
+            endPoint = path[i + 1].absCoords;
+        }
+
+        if (!endPoint)  return false;
+
+        var adjancentItems = {
+                items: items,
+                points: [].concat(
+                    path[index - 2].absCoords,
+                    path[index - 1].absCoords,
+                    path[index].absCoords,
+                    endPoint
+                )
+            },
+            nextM;
+
+        // Find next move command
+        for (var i = index + 1; (nextM = path[i]) && 'Mm'.indexOf(nextM.instruction) === -1; i++);
+        if (nextM) adjancentItems.nextM = nextM;
+
+        return adjancentItems;
+
+    }
+
+    return false;
 
 }
