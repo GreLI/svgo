@@ -53,19 +53,6 @@ exports.transformsMultiply = function(transforms) {
     transforms = transforms.map(function(transform) {
         if (transform.name === 'matrix') {
             return transform.data;
-        } else if (simple) {
-            if (transform.name == 'scale') {
-                scalex *= transform.data[0];
-                scaley *= transform.data[1];
-            } else if (transform.name == 'rotate') {
-                if (scalex.toFixed(precision) == scaley.toFixed(precision)) {
-                    rotate += transform.data[0];
-                } else {
-                    simple = false;
-                }
-            } else if (transform.name != 'translate') {
-                simple = false;
-            }
         }
         return transformToMatrix(transform);
     });
@@ -76,15 +63,6 @@ exports.transformsMultiply = function(transforms) {
         data: transforms.reduce(function(a, b) {
             return multiplyTransformMatrices(a, b);
         })
-    }
-
-    if (simple) {
-        transforms.splitted = {
-            scalex: scalex,
-            scaley: scaley,
-            rotate: rotate,
-            isSimple: true
-        }
     }
 
     return transforms;
@@ -263,6 +241,52 @@ function transformToMatrix(transform) {
     }
 
     return matrix;
+
+};
+
+/**
+ * Applies transformation to an arc. To do so, we represent ellipse as a matrix, multiply it
+ * by the transformation matrix and use a singular value decomposition to represent in a form
+ * rotate(θ)·scale(a b)·rotate(φ). This gives us new ellipse params a, b and θ.
+ * SVD is being done with the formulae provided by Wolffram|Alpha (svd {{m0, m2}, {m1, m3}})
+ *
+ * @param {Array} arc [a, b, rotation in deg]
+ * @param {Array} transform transformation matrix
+ * @return {Array} arc transformed input arc
+ */
+exports.transformArc = function(arc, transform) {
+
+    var a = arc[0],
+        b = arc[1],
+        rot = arc[2] * Math.PI / 180,
+        cos = Math.cos(rot),
+        sin = Math.sin(rot),
+        ellipse = [a * cos, b * sin, -a * sin, b * cos, 0, 0],
+        m = multiplyTransformMatrices(transform, ellipse),
+        // Decompose the new ellipse matrix
+        lastCol = m[2] * m[2] + m[3] * m[3],
+        squareSum = m[0] * m[0] + m[1] * m[1] + lastCol,
+        root = Math.sqrt(
+            (Math.pow(m[0] - m[3], 2) + Math.pow(m[1] + m[2], 2)) *
+            (Math.pow(m[0] + m[3], 2) + Math.pow(m[1] - m[2], 2))
+        );
+
+    if (!root) { // circle
+        arc[0] = arc[1] = Math.sqrt(squareSum / 2);
+        arc[2] = 0;
+    } else {
+        var majorAxisSqr = (squareSum + root) / 2,
+            minorAxisSqr = (squareSum - root) / 2,
+            major = majorAxisSqr != lastCol,
+            sub = (major ? majorAxisSqr : minorAxisSqr) - lastCol,
+            rowsSum = m[0] * m[2] + m[1] * m[3],
+            term1 = m[0] * sub + m[2] * rowsSum,
+            term2 = m[1] * sub + m[3] * rowsSum;
+        arc[0] = Math.sqrt(majorAxisSqr);
+        arc[1] = Math.sqrt(minorAxisSqr);
+        arc[2] = Math.acos((major ? term1 : term2) / Math.sqrt(term1 * term1 + term2 * term2)) * 180 / Math.PI;
+    }
+    return arc;
 
 };
 
