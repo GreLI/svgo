@@ -5,16 +5,17 @@ exports.type = 'perItem';
 exports.active = true;
 
 exports.params = {
-      convertToShorts: true,
-      transformPrecision: 5,
-      matrixToTransform: true,
-      shortTranslate: true,
-      shortScale: true,
-      shortRotate: true,
-      removeUseless: true,
-      collapseIntoOne: true,
-      leadingZero: true,
-      negativeExtraSpace: false
+    convertToShorts: true,
+    floatPrecision: 3,
+    transformPrecision: 5,
+    matrixToTransform: true,
+    shortTranslate: true,
+    shortScale: true,
+    shortRotate: true,
+    removeUseless: true,
+    collapseIntoOne: true,
+    leadingZero: true,
+    negativeExtraSpace: false
 };
 
 var cleanupOutData = require('../lib/svgo/tools').cleanupOutData,
@@ -67,41 +68,34 @@ exports.fn = function(item, params) {
  * @param {Object} params plugin params
  */
 function convertTransform(item, attrName, params) {
+    var data = transform2js(item.attr(attrName).value),
+        matrixData = data.reduce(function(a, b) { return b.name == 'matrix' ? a.concat(b.data) : a }, []);
 
-    var data = transform2js(item.attr(attrName).value);
+    // Normalize transform precision. No sense in calculating with larger precision–it only adds error.
+    if (matrixData.length) {
+        params.transformPrecision = Math.min(params.transformPrecision,
+            Math.max.apply(Math, matrixData.map(function(n) {
+                return (n = String(n)).slice(n.indexOf('.')).length - 1;
+            })) || params.transformPrecision);
+    }
+
+    if (params.collapseIntoOne && data.length > 1) {
+        data = [transformsMultiply(data)];
+    }
 
     if (params.convertToShorts) {
         data = convertToShorts(data, params);
+    } else {
+        data.forEach(function(transform) {
+            transform = roundTransform(transform, params);
+        });
     }
 
     if (params.removeUseless) {
         data = removeUseless(data);
     }
 
-    if (
-        params.collapseIntoOne &&
-        (
-            data.length >= 3 ||
-            data.length == 2 &&
-            (
-                data[0].name === 'matrix' || data[1].name === 'matrix' ||
-                data[0].name == data[1].name
-            )
-        )
-    ) {
-        data = [transformsMultiply(data, params.transformPrecision)];
-
-        if (params.matrixToTransform) {
-            data = [matrixToTransform(data[0], params.transformPrecision)];
-        }
-
-        if (params.removeUseless) {
-            data = removeUseless(data);
-        }
-    }
-
     item.attr(attrName).value = js2transform(data, params);
-
 }
 
 /**
@@ -120,11 +114,14 @@ function convertToShorts(transforms, params) {
         // convert matrix to the short aliases
         if (
             params.matrixToTransform &&
-            transforms.length < 3 &&
             transform.name === 'matrix'
         ) {
-            transforms[i] = matrixToTransform(transform, params.transformPrecision);
+            transform = matrixToTransform(transform, params);
+            transforms.splice.apply(transforms, [i, 1].concat(transform));
+            transform = transforms[i];
         }
+
+        transform = roundTransform(transform, params);
 
         // fixed-point numbers
         // 12.754997 → 12.755
@@ -142,7 +139,7 @@ function convertToShorts(transforms, params) {
             transform.data.length === 2 &&
             transform.data[1] === 0
         ) {
-            transform.data = [transform.data[0]];
+            transform.data.pop();
         }
 
         // convert long scale transform notation to the shorts one
@@ -153,7 +150,7 @@ function convertToShorts(transforms, params) {
             transform.data.length === 2 &&
             transform.data[0] === transform.data[1]
         ) {
-            transform.data = [transform.data[0]];
+            transform.data.pop();
         }
 
         // convert long rotate transform notation to the short one
@@ -243,4 +240,49 @@ function js2transform(transformJS, params) {
 
     return transformString;
 
+}
+
+function roundTransform(transform, params) {
+    var floatRound = params.floatPrecision > 0 ? smartRound : round,
+        transformRound = params.transformPrecision > 0 ? smartRound : round;
+
+    switch (transform.name) {
+        case 'translate':
+        case 'rotate':
+        case 'skewX':
+        case 'skewY':
+            if (floatRound(transform.data, params.floatPrecision)[0] == 45.01)
+                console.log(transform)
+            transform.data = floatRound(transform.data, params.floatPrecision);
+        case 'scale':
+            transform.data = transformRound(transform.data, params.transformPrecision);
+        case 'matrix':
+            transform.data = transformRound(transform.data.slice(0, 4), params.transformPrecision)
+                .concat(floatRound(transform.data.slice(4), params.floatPrecision))
+    }
+
+    return transform;
+}
+
+function round(data) {
+    return data.map(Math.round);
+}
+
+/**
+ * Decrease accuracy of floating-point numbers
+ * in transforms keeping a specified number of decimals.
+ * Smart rounds values like 2.349 to 2.35.
+ *
+ * @param {Array} data input data array
+ * @param {Number} fixed number of decimals
+ * @return {Array} output data array
+ */
+function smartRound(data, precision) {
+    for (var i = data.length, tolerance = Math.pow(.1, precision); i--;) {
+        var rounded = +data[i].toFixed(precision - 1);
+        data[i] = +Math.abs(rounded - data[i]).toFixed(precision) >= tolerance ?
+            +data[i].toFixed(precision) :
+            rounded;
+    }
+    return data;
 }

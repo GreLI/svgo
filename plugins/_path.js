@@ -167,11 +167,10 @@ var relative2absolute = exports.relative2absolute = function(data) {
  *
  * @param {Object} elem current element
  * @param {Array} path input path data
- * @param {Boolean} applyTransformsStroked whether to apply transforms to stroked lines.
- * @param {Number} floatPrecision precision (used for stroke width)
+ * @param {Object} params whether to apply transforms to stroked lines and transform precision (used for stroke width)
  * @return {Array} output path data
  */
-exports.applyTransforms = function(elem, path, applyTransformsStroked, floatPrecision) {
+exports.applyTransforms = function(elem, path, params) {
     // if there are no 'stroke' attr and references to other objects such as
     // gradiends or clip-path which are also subjects to transform.
     if (!elem.hasAttr('transform') ||
@@ -180,27 +179,30 @@ exports.applyTransforms = function(elem, path, applyTransformsStroked, floatPrec
         }))
         return path;
 
-    var matrix = transformsMultiply(transform2js(elem.attr('transform').value), 9),
+    var matrix = transformsMultiply(transform2js(elem.attr('transform').value)),
         splittedMatrix = matrix.splitted || splitMatrix(matrix.data),
         stroke = elem.computedAttr('stroke'),
+        transformPrecision = params.transformPrecision,
+        shear,
         newPoint, sx, sy;
 
     if (stroke && stroke.value != 'none'){
-      if (!applyTransformsStroked){
+      if (!params.applyTransformsStroked){
         return path;
       }
       if (matrix.name == 'matrix'){
-        sx = +Math.sqrt(matrix.data[0] * matrix.data[0] + matrix.data[1] * matrix.data[1]).toFixed(floatPrecision);
-        sy = +Math.sqrt(matrix.data[2] * matrix.data[2] + matrix.data[3] * matrix.data[3]).toFixed(floatPrecision);
+        shear = +(matrix.data[0] * matrix.data[2] + matrix.data[1] * matrix.data[3]).toFixed(transformPrecision);
+        sx = +Math.sqrt(matrix.data[0] * matrix.data[0] + matrix.data[1] * matrix.data[1]).toFixed(transformPrecision);
+        sy = +Math.sqrt(matrix.data[2] * matrix.data[2] + matrix.data[3] * matrix.data[3]).toFixed(transformPrecision);
       } else if (matrix.name == 'scale'){
-        sx = +matrix.data[0].toFixed(floatPrecision);
-        sy = +matrix.data[1].toFixed(floatPrecision);
+        sx = +matrix.data[0].toFixed(transformPrecision);
+        sy = +matrix.data[1].toFixed(transformPrecision);
       } else {
         sx = 1;
         sy = 1;
       }
 
-      if (sx !== sy){
+      if (shear || sx !== sy){
         return path;
       }
       if (sx !== 1){
